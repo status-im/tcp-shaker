@@ -1,4 +1,4 @@
-// +build linux
+// +build darwin
 
 package tcp
 
@@ -17,7 +17,7 @@ type Checker struct {
 	pipePool
 	resultPipes
 	pollerLock sync.Mutex
-	_pollerFd  int32
+	_kqueueFd  int32
 	zeroLinger bool
 	isReady    chan struct{}
 }
@@ -32,7 +32,7 @@ func NewCheckerZeroLinger(zeroLinger bool) *Checker {
 	return &Checker{
 		pipePool:    newPipePoolSyncPool(),
 		resultPipes: newResultPipesSyncMap(),
-		_pollerFd:   -1,
+		_kqueueFd:   -1,
 		zeroLinger:  zeroLinger,
 		isReady:     make(chan struct{}),
 	}
@@ -41,7 +41,7 @@ func NewCheckerZeroLinger(zeroLinger bool) *Checker {
 // CheckingLoop must be called before anything else.
 // NOTE: this function blocks until ctx got canceled.
 func (c *Checker) CheckingLoop(ctx context.Context) error {
-	pollerFd, err := c.createPoller()
+	kqueue, err := c.createPoller()
 	if err != nil {
 		return errors.Wrap(err, "error creating poller")
 	}
@@ -50,35 +50,35 @@ func (c *Checker) CheckingLoop(ctx context.Context) error {
 	c.setReady()
 	defer c.resetReady()
 
-	return c.pollingLoop(ctx, pollerFd)
+	return c.pollingLoop(ctx, kqueue)
 }
 
 func (c *Checker) createPoller() (int, error) {
 	c.pollerLock.Lock()
 	defer c.pollerLock.Unlock()
 
-	if c.PollerFDAtomic() > 0 {
+	if c.getKQueueAtomic() > 0 {
 		// return if already initialized
 		return -1, ErrCheckerAlreadyStarted
 	}
 
-	pollerFd, err := createPoller()
+	kqueue, err := createPoller()
 	if err != nil {
 		return -1, err
 	}
-	c.setPollerFD(pollerFd)
+	c.setKQueueAtomic(kqueue)
 
-	return pollerFd, nil
+	return kqueue, nil
 }
 
 func (c *Checker) closePoller() error {
 	c.pollerLock.Lock()
 	defer c.pollerLock.Unlock()
 	var err error
-	if c.PollerFDAtomic() > 0 {
-		err = unix.Close(c.PollerFDAtomic())
+	if c.getKQueueAtomic() > 0 {
+		err = unix.Close(c.getKQueueAtomic())
 	}
-	c.setPollerFD(-1)
+	c.setKQueueAtomic(-1)
 	return err
 }
 
@@ -92,13 +92,13 @@ func (c *Checker) resetReady() {
 
 const pollerTimeout = time.Second
 
-func (c *Checker) pollingLoop(ctx context.Context, pollerFd int) error {
+func (c *Checker) pollingLoop(ctx context.Context, kqueue int) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			evts, err := pollEvents(pollerFd, pollerTimeout)
+			evts, err := pollEvents(kqueue, pollerTimeout)
 			if err != nil {
 				// fatal error
 				return errors.Wrap(err, "error during polling loop")
@@ -119,12 +119,12 @@ func (c *Checker) handlePollerEvents(evts []event) {
 	}
 }
 
-func (c *Checker) PollerFDAtomic() int {
-	return int(atomic.LoadInt32(&c._pollerFd))
+func (c *Checker) getKQueueAtomic() int {
+	return int(atomic.LoadInt32(&c._kqueueFd))
 }
 
-func (c *Checker) setPollerFD(fd int) {
-	atomic.StoreInt32(&c._pollerFd, int32(fd))
+func (c *Checker) setKQueueAtomic(fd int) {
+	atomic.StoreInt32(&c._kqueueFd, int32(fd))
 }
 
 // CheckAddr performs a TCP check with given TCP address and timeout
@@ -178,12 +178,15 @@ func (c *Checker) waitConnectResult(fd int, timeout time.Duration) error {
 	// this must be done before registerEvents
 	c.resultPipes.registerResultPipe(fd, resultPipe)
 	// Register to epoll for later error checking
-	if err := registerEvents(c.PollerFDAtomic(), fd); err != nil {
+	err := registerEvents(c.KQueue(), fd)
+	if err != nil {
 		return err
 	}
 
 	// Wait for connect result
-	return c.waitPipeTimeout(resultPipe, timeout)
+	err = c.waitPipeTimeout(resultPipe, timeout)
+
+	return err
 }
 
 func (c *Checker) waitPipeTimeout(pipe chan error, timeout time.Duration) error {
@@ -202,11 +205,11 @@ func (c *Checker) WaitReady() <-chan struct{} {
 
 // IsReady returns a bool indicates whether the Checker is ready for use
 func (c *Checker) IsReady() bool {
-	return c.PollerFDAtomic() > 0
+	return c.getKQueueAtomic() > 0
 }
 
 // PollerFd returns the inner fd of poller instance.
 // NOTE: Use this only when you really know what you are doing.
-func (c *Checker) PollerFd() int {
-	return c.PollerFDAtomic()
+func (c *Checker) KQueue() int {
+	return c.getKQueueAtomic()
 }

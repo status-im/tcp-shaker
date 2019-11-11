@@ -1,16 +1,15 @@
-// +build linux
+// +build darwin
 
 package tcp
 
 import (
-	"fmt"
 	"os"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-const maxEpollEvents = 32
+const maxKEvents = 32
 
 // createSocket creates a socket with necessary options set.
 func createSocketZeroLinger(zeroLinger bool) (fd int, err error) {
@@ -46,17 +45,17 @@ func _createSocket() (int, error) {
 		return 0, os.NewSyscallError("socket", err)
 	}
 
-	unix.CloseOnExec(fd)
+	//unix.CloseOnExec(fd)
 	return fd, err
 }
 
-// setSockOpts sets SOCK_NONBLOCK and TCP_QUICKACK for given fd
+// setSockOpts sets SOCK_NONBLOCK and TCP_NODELAY for given fd
 func _setSockOpts(fd int) error {
 	err := unix.SetNonblock(fd, true)
 	if err != nil {
 		return err
 	}
-	return unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_QUICKACK, 0)
+	return unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 0)
 }
 
 var zeroLinger = unix.Linger{Onoff: 1, Linger: 0}
@@ -66,41 +65,42 @@ func _setZeroLinger(fd int) error {
 	return unix.SetsockoptLinger(fd, unix.SOL_SOCKET, unix.SO_LINGER, &zeroLinger)
 }
 
-func createPoller() (fd int, err error) {
-	fd, err = unix.EpollCreate1(unix.EPOLL_CLOEXEC)
+func createPoller() (kq int, err error) {
+	kq, err = unix.Kqueue()
 	if err != nil {
-		err = os.NewSyscallError("epoll_create1", err)
+		err = os.NewSyscallError("kqueue", err)
 	}
-	return fd, err
+	return kq, err
 }
 
-// registerEvents registers given fd with read and write events.
-func registerEvents(pollerFd int, fd int) error {
-	var event unix.EpollEvent
-	event.Events = unix.EPOLLOUT | unix.EPOLLIN | unix.EPOLLET
-	event.Fd = int32(fd)
-	if err := unix.EpollCtl(pollerFd, unix.EPOLL_CTL_ADD, fd, &event); err != nil {
-		return os.NewSyscallError(fmt.Sprintf("epoll_ctl(%d, ADD, %d, ...)", pollerFd, fd), err)
+// registerEvents registers given fd with read events.
+func registerEvents(kq, fd int) error {
+	eventFilter := unix.Kevent_t{}
+	unix.SetKevent(&eventFilter, fd, unix.EVFILT_WRITE, unix.EV_ADD|unix.EV_ONESHOT)
+	// doesn't block, just sets the events we are interested in
+	_, err := unix.Kevent(kq, []unix.Kevent_t{eventFilter}, []unix.Kevent_t{}, nil)
+	if err != nil {
+		return os.NewSyscallError("kevent", err)
 	}
 	return nil
 }
 
-func pollEvents(pollerFd int, timeout time.Duration) ([]event, error) {
-	var timeoutMS = int(timeout.Nanoseconds() / 1e6)
-	var epollEvents [maxEpollEvents]unix.EpollEvent
+func pollEvents(kq int, timeout time.Duration) ([]event, error) {
+	tsTimeout := unix.NsecToTimespec(timeout.Nanoseconds())
+	rEvents := make([]unix.Kevent_t, maxKEvents)
 	// this blocks, waiting for socket events
-	nEvents, err := unix.EpollWait(pollerFd, epollEvents[:], timeoutMS)
+	nEvents, err := unix.Kevent(kq, []unix.Kevent_t{}, rEvents, &tsTimeout)
 	if err != nil {
 		if err == unix.EINTR {
 			return nil, nil
 		}
-		return nil, os.NewSyscallError("epoll_wait", err)
+		return nil, os.NewSyscallError("kevent", err)
 	}
 
 	var events = make([]event, 0, nEvents)
 
 	for i := 0; i < nEvents; i++ {
-		var fd = int(epollEvents[i].Fd)
+		var fd = int(rEvents[i].Ident)
 		var evt = event{Fd: fd, Err: nil}
 
 		errCode, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)

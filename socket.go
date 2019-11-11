@@ -1,3 +1,5 @@
+// +build !windows
+
 package tcp
 
 import (
@@ -22,6 +24,7 @@ func parseSockAddr(addr string) (unix.Sockaddr, error) {
 
 // connect calls the connect syscall with error handled.
 func connect(fd int, addr unix.Sockaddr) (success bool, err error) {
+	// Connect() sends the actual SYN
 	switch serr := unix.Connect(fd, addr); serr {
 	case unix.EALREADY, unix.EINPROGRESS, unix.EINTR:
 		// Connection could not be made immediately but asynchronously.
