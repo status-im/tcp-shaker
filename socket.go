@@ -3,6 +3,7 @@
 package tcp
 
 import (
+	"fmt"
 	"net"
 	"runtime"
 
@@ -11,14 +12,17 @@ import (
 
 // parseSockAddr resolves given addr to unix.Sockaddr
 func parseSockAddr(addr string) (unix.Sockaddr, error) {
+	fmt.Println("Attempting to parseSckAddr ->", addr)
 	tAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
+		fmt.Println("Error in net.ResolveTCPAddr ->", err)
 		return nil, err
 	}
 	var addr4 [4]byte
 	if tAddr.IP != nil {
 		copy(addr4[:], tAddr.IP.To4()) // copy last 4 bytes of slice to array
 	}
+	fmt.Println("Resolved Port is ->", tAddr.Port, "Resolved Addr is -> ", addr4)
 	return &unix.SockaddrInet4{Port: tAddr.Port, Addr: addr4}, nil
 }
 
