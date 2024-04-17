@@ -3,6 +3,7 @@
 package tcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"runtime"
@@ -10,8 +11,21 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+
 // parseSockAddr resolves given addr to unix.Sockaddr
 func parseSockAddr(addr string) (unix.Sockaddr, error) {
+	const bootstrapDNS = "8.8.8.8:53"
+	var dialer net.Dialer
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: false,
+		Dial: func(context context.Context, _, _ string) (net.Conn, error) {
+			conn, err := dialer.DialContext(context, "udp", bootstrapDNS)
+			if err != nil {
+				return nil, err
+			}
+			return conn, nil
+		},
+	}
 	fmt.Println("Attempting to parseSckAddr ->", addr)
 	tAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
